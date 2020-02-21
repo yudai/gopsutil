@@ -30,6 +30,23 @@ type TimesStat struct {
 	GuestNice float64 `json:"guestNice"`
 }
 
+// PercentStat contains the percentages of the CPU time spent performing
+// different kinds of work.
+// Note that Guest is part of User and GuestNice is part of Nice.
+type PercentStat struct {
+	CPU       string  `json:"cpu"`
+	User      float64 `json:"user"`
+	System    float64 `json:"system"`
+	Idle      float64 `json:"idle"`
+	Nice      float64 `json:"nice"`
+	Iowait    float64 `json:"iowait"`
+	Irq       float64 `json:"irq"`
+	Softirq   float64 `json:"softirq"`
+	Steal     float64 `json:"steal"`
+	Guest     float64 `json:"guest"`
+	GuestNice float64 `json:"guestNice"`
+}
+
 type InfoStat struct {
 	CPU        int32    `json:"cpu"`
 	VendorID   string   `json:"vendorId"`
@@ -116,7 +133,7 @@ func calculateBusy(t1, t2 TimesStat) float64 {
 	return math.Min(100, math.Max(0, (t2Busy-t1Busy)/(t2All-t1All)*100))
 }
 
-func calculateAllBusy(t1, t2 []TimesStat) ([]float64, error) {
+func CalculatePercent(t1, t2 []TimesStat) ([]float64, error) {
 	// Make sure the CPU measurements have the same length.
 	if len(t1) != len(t2) {
 		return nil, fmt.Errorf(
@@ -132,6 +149,59 @@ func calculateAllBusy(t1, t2 []TimesStat) ([]float64, error) {
 	return ret, nil
 }
 
+func calculateItem(v1, v2, duration float64) float64 {
+	if v2 <= v1 {
+		return 0
+	}
+	if duration <= 0 {
+		return 0
+	}
+
+	return math.Min(100, math.Max(0, (v2-v1)/(duration)*100))
+}
+
+func calculateItems(t1, t2 TimesStat) PercentStat {
+	duration := t2.Total() - t1.Total()
+
+	items := PercentStat{
+		CPU:       t1.CPU,
+		User:      calculateItem(t1.User, t2.User, duration),
+		System:    calculateItem(t1.System, t2.System, duration),
+		Idle:      calculateItem(t1.Idle, t2.Idle, duration),
+		Nice:      calculateItem(t1.Nice, t2.Nice, duration),
+		Iowait:    calculateItem(t1.Iowait, t2.Iowait, duration),
+		Irq:       calculateItem(t1.Irq, t2.Irq, duration),
+		Softirq:   calculateItem(t1.Softirq, t2.Softirq, duration),
+		Steal:     calculateItem(t1.Steal, t2.Steal, duration),
+		Guest:     calculateItem(t1.Guest, t2.Guest, duration),
+		GuestNice: calculateItem(t1.GuestNice, t2.GuestNice, duration),
+	}
+
+	return items
+}
+
+func CalculateItemizedPercent(t1, t2 []TimesStat) ([]PercentStat, error) {
+	// Make sure the CPU measurements have the same length.
+	if len(t1) != len(t2) {
+		return nil, fmt.Errorf(
+			"received two CPU counts: %d != %d",
+			len(t1), len(t2),
+		)
+	}
+
+	ret := make([]PercentStat, len(t1))
+	for i, t := range t2 {
+		if t1[i].CPU != t.CPU {
+			return nil, fmt.Errorf(
+				"CPU number mismatch at %d: %s != %s",
+				i, t1[i].CPU, t.CPU,
+			)
+		}
+		ret[i] = calculateItems(t1[i], t)
+	}
+	return ret, nil
+}
+
 // Percent calculates the percentage of cpu used either per CPU or combined.
 // If an interval of 0 is given it will compare the current cpu times against the last call.
 // Returns one value per cpu, or a single value if percpu is set to false.
@@ -139,32 +209,64 @@ func Percent(interval time.Duration, percpu bool) ([]float64, error) {
 	return PercentWithContext(context.Background(), interval, percpu)
 }
 
+// ItemizedPercent calculates the percentage of CPU time used for different type of work
+// either per CPU or combined.
+// If an interval of 0 is given it will compare the current cpu times against the last call.
+// Returns one value per cpu, or a single value if percpu is set to false.
+// When interval is too small, returned values can be all zero.
+func ItemizedPercent(interval time.Duration, percpu bool) ([]PercentStat, error) {
+	return ItemizedPercentWithContext(context.Background(), interval, percpu)
+}
+
 func PercentWithContext(ctx context.Context, interval time.Duration, percpu bool) ([]float64, error) {
+	t1, t2, err := sample(ctx, interval, percpu)
+	if err != nil {
+		return nil, err
+	}
+
+	return CalculatePercent(t1, t2)
+}
+
+func ItemizedPercentWithContext(ctx context.Context, interval time.Duration, percpu bool) ([]PercentStat, error) {
+	t1, t2, err := sample(ctx, interval, percpu)
+	if err != nil {
+		return nil, err
+	}
+
+	return CalculateItemizedPercent(t1, t2)
+}
+
+func sample(ctx context.Context, interval time.Duration, percpu bool) (t1, t2 []TimesStat, err error) {
 	if interval <= 0 {
-		return percentUsedFromLastCall(percpu)
+		return sampleAndSaveAsLast(ctx, percpu)
 	}
 
 	// Get CPU usage at the start of the interval.
-	cpuTimes1, err := Times(percpu)
+	t1, err = TimesWithContext(ctx, percpu)
 	if err != nil {
-		return nil, err
+		return
 	}
 
-	time.Sleep(interval)
+	select {
+	case <-time.After(interval):
+	case <-ctx.Done():
+		err = ctx.Err()
+		return
+	}
 
 	// And at the end of the interval.
-	cpuTimes2, err := Times(percpu)
+	t2, err = TimesWithContext(ctx, percpu)
 	if err != nil {
-		return nil, err
+		return
 	}
 
-	return calculateAllBusy(cpuTimes1, cpuTimes2)
+	return
 }
 
-func percentUsedFromLastCall(percpu bool) ([]float64, error) {
-	cpuTimes, err := Times(percpu)
+func sampleAndSaveAsLast(ctx context.Context, percpu bool) ([]TimesStat, []TimesStat, error) {
+	cpuTimes, err := TimesWithContext(ctx, percpu)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	lastCPUPercent.Lock()
 	defer lastCPUPercent.Unlock()
@@ -178,7 +280,7 @@ func percentUsedFromLastCall(percpu bool) ([]float64, error) {
 	}
 
 	if lastTimes == nil {
-		return nil, fmt.Errorf("error getting times for cpu percent. lastTimes was nil")
+		return nil, nil, fmt.Errorf("error getting times for cpu percent. lastTimes was nil")
 	}
-	return calculateAllBusy(lastTimes, cpuTimes)
+	return lastTimes, cpuTimes, nil
 }
