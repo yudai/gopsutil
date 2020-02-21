@@ -15,7 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/StackExchange/wmi"
-	"github.com/shirou/gopsutil/internal/common"
+	"github.com/yudai/gopsutil/internal/common"
 	process "github.com/shirou/gopsutil/process"
 	"golang.org/x/sys/windows"
 )

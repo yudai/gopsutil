@@ -16,7 +16,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/shirou/gopsutil/internal/common"
+	"github.com/yudai/gopsutil/internal/common"
 )
 
 const ( // Conntrack Column numbers
